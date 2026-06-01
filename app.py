@@ -1,6 +1,6 @@
 # ============================================
-# AI PLAGIARISM DETECTOR - ACCURATE VERSION
-# N-gram Overlap + Synonym Matching + Chunk Detection
+# AI PLAGIARISM DETECTOR - FINAL VERSION
+# N-gram + Fuzzy + Jaccard + Semantic Hybrid
 # ============================================
 
 from flask import Flask, request, render_template, send_file
@@ -9,6 +9,7 @@ import io
 import re
 import docx2txt
 import PyPDF2
+from rapidfuzz import fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
@@ -103,6 +104,11 @@ def split_into_sentences(text):
     return [s.strip() for s in sentences if len(s.strip()) > 10]
 
 
+def calculate_fuzzy_similarity(text1, text2):
+    """Fuzzy string matching - catches spelling errors and minor word changes"""
+    return fuzz.token_sort_ratio(text1.lower(), text2.lower())
+
+
 # ============================================
 # ACCURATE SIMILARITY CALCULATION
 # ============================================
@@ -161,18 +167,21 @@ def calculate_semantic_similarity(text1, text2):
 def calculate_hybrid_similarity(text1, text2):
     """
     Hybrid Score:
-    - 50% N-gram overlap (direct copy detection)
-    - 30% Jaccard (word overlap)
-    - 20% Semantic (synonym normalized)
+    - 40% N-gram overlap (direct copy detection)
+    - 25% Fuzzy (spelling/word order changes)
+    - 20% Jaccard (word overlap)
+    - 15% Semantic (synonym normalized)
     """
     ngram_score = calculate_ngram_overlap(text1, text2)
+    fuzzy_score = calculate_fuzzy_similarity(text1, text2)
     jaccard_score = calculate_jaccard_similarity(text1, text2)
     semantic_score = calculate_semantic_similarity(text1, text2)
     
-    hybrid = round(ngram_score * 0.5 + jaccard_score * 0.3 + semantic_score * 0.2, 2)
+    hybrid = round(ngram_score * 0.4 + fuzzy_score * 0.25 + jaccard_score * 0.2 + semantic_score * 0.15, 2)
     
     return {
         "ngram": ngram_score,
+        "fuzzy": fuzzy_score,
         "jaccard": jaccard_score,
         "semantic": semantic_score,
         "hybrid": hybrid
@@ -249,6 +258,7 @@ def generate_pdf_report(result):
         [Paragraph('<b>Detection Type</b>', normal_style), Paragraph('<b>Score</b>', normal_style)],
         [Paragraph('Overall Similarity', normal_style), Paragraph(f"{result.get('hybrid_similarity', 0)}%", normal_style)],
         [Paragraph('N-gram Overlap (Exact Copy)', normal_style), Paragraph(f"{result.get('ngram_similarity', 0)}%", normal_style)],
+        [Paragraph('Fuzzy Match (Edit Detection)', normal_style), Paragraph(f"{result.get('fuzzy_similarity', 0)}%", normal_style)],
         [Paragraph('Word Overlap (Jaccard)', normal_style), Paragraph(f"{result.get('jaccard_similarity', 0)}%", normal_style)],
         [Paragraph('Semantic Match (Meaning)', normal_style), Paragraph(f"{result.get('semantic_similarity', 0)}%", normal_style)],
         [Paragraph('Direct Copy Detected', normal_style), Paragraph(f"{result.get('direct_match_percent', 0)}%", normal_style)],
@@ -345,6 +355,7 @@ def check_plagiarism():
         "doc2_name": file2.filename,
         "hybrid_similarity": hybrid_score,
         "ngram_similarity": scores['ngram'],
+        "fuzzy_similarity": scores['fuzzy'],
         "jaccard_similarity": scores['jaccard'],
         "semantic_similarity": scores['semantic'],
         "direct_match_percent": direct_match_percent,
