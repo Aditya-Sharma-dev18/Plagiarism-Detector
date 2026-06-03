@@ -1,6 +1,6 @@
 # ============================================
 # AI PLAGIARISM DETECTOR - FINAL VERSION
-# N-gram + Fuzzy + Jaccard + Semantic Hybrid
+# N-gram + Fuzzy + Jaccard + Semantic + WordNet
 # ============================================
 
 from flask import Flask, request, render_template, send_file
@@ -13,6 +13,13 @@ from rapidfuzz import fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
+import nltk
+from nltk.corpus import wordnet
+
+# Download WordNet data (first time only)
+nltk.download('wordnet', quiet=True)
+nltk.download('punkt', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
 
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -24,7 +31,7 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads/'
 
 # ============================================
-# SYNONYM DICTIONARY
+# SYNONYM DICTIONARY (Manual - Common Words)
 # ============================================
 synonym_dict = {
     "learn": ["study", "understand", "grasp"],
@@ -51,6 +58,9 @@ synonym_dict = {
     "good": ["great", "excellent", "fine", "superior"],
     "easy": ["simple", "straightforward", "effortless"],
 }
+
+# Cache for WordNet lookups (performance optimization)
+wordnet_cache = {}
 
 
 # ============================================
@@ -110,7 +120,69 @@ def calculate_fuzzy_similarity(text1, text2):
 
 
 # ============================================
-# ACCURATE SIMILARITY CALCULATION
+# WORDNET INTEGRATION
+# ============================================
+
+def get_wordnet_synonym(word):
+    """
+    Get the most common synonym for a word using WordNet.
+    Uses caching for performance.
+    """
+    # Check cache first
+    if word in wordnet_cache:
+        return wordnet_cache[word]
+    
+    try:
+        synsets = wordnet.synsets(word)
+        if synsets:
+            # Get lemmas from the most common synset
+            lemmas = synsets[0].lemmas()
+            if len(lemmas) > 1:
+                # Use the second lemma (first one is usually the word itself)
+                synonym = lemmas[1].name().replace('_', ' ')
+                wordnet_cache[word] = synonym
+                return synonym
+        
+        # No synonym found, return original word
+        wordnet_cache[word] = word
+        return word
+    except:
+        wordnet_cache[word] = word
+        return word
+
+
+def normalize_text_with_wordnet(text):
+    """
+    Replace words with WordNet synonyms.
+    First applies manual dictionary, then WordNet on remaining words.
+    """
+    # First apply manual synonym dictionary
+    text_lower = text.lower()
+    for base_word, synonyms in synonym_dict.items():
+        for syn in synonyms:
+            if syn in text_lower:
+                text_lower = text_lower.replace(syn, base_word)
+    
+    # Then apply WordNet for words not in manual dictionary
+    words = text_lower.split()
+    normalized_words = []
+    
+    for word in words:
+        # Skip very short words and stop words
+        if len(word) <= 3 or word in ['the', 'is', 'are', 'was', 'were', 'been', 
+                                       'have', 'has', 'had', 'will', 'would', 'shall',
+                                       'can', 'could', 'may', 'might', 'must', 'should',
+                                       'this', 'that', 'these', 'those', 'they', 'them',
+                                       'from', 'with', 'for', 'and', 'but', 'not']:
+            normalized_words.append(word)
+        else:
+            normalized_words.append(get_wordnet_synonym(word))
+    
+    return ' '.join(normalized_words)
+
+
+# ============================================
+# SIMILARITY CALCULATION
 # ============================================
 
 def calculate_ngram_overlap(text1, text2, n=4):
@@ -147,20 +219,15 @@ def calculate_jaccard_similarity(text1, text2):
     return round(len(intersection) / len(union) * 100, 2)
 
 
-def normalize_text(text):
-    """Replace synonyms with base words"""
-    text_lower = text.lower()
-    for base_word, synonyms in synonym_dict.items():
-        for syn in synonyms:
-            if syn in text_lower:
-                text_lower = text_lower.replace(syn, base_word)
-    return text_lower
-
-
 def calculate_semantic_similarity(text1, text2):
-    """Semantic similarity using synonym normalization + Jaccard"""
-    norm1 = normalize_text(text1)
-    norm2 = normalize_text(text2)
+    """
+    Semantic similarity using:
+    1. Manual synonym dictionary
+    2. WordNet synonym replacement
+    3. Jaccard similarity on normalized text
+    """
+    norm1 = normalize_text_with_wordnet(text1)
+    norm2 = normalize_text_with_wordnet(text2)
     return calculate_jaccard_similarity(norm1, norm2)
 
 
@@ -170,14 +237,15 @@ def calculate_hybrid_similarity(text1, text2):
     - 40% N-gram overlap (direct copy detection)
     - 25% Fuzzy (spelling/word order changes)
     - 20% Jaccard (word overlap)
-    - 15% Semantic (synonym normalized)
+    - 15% Semantic (WordNet + manual synonyms)
     """
     ngram_score = calculate_ngram_overlap(text1, text2)
     fuzzy_score = calculate_fuzzy_similarity(text1, text2)
     jaccard_score = calculate_jaccard_similarity(text1, text2)
     semantic_score = calculate_semantic_similarity(text1, text2)
     
-    hybrid = round(ngram_score * 0.4 + fuzzy_score * 0.25 + jaccard_score * 0.2 + semantic_score * 0.15, 2)
+    hybrid = round(ngram_score * 0.4 + fuzzy_score * 0.25 + 
+                   jaccard_score * 0.2 + semantic_score * 0.15, 2)
     
     return {
         "ngram": ngram_score,
@@ -194,16 +262,11 @@ def find_matching_sentences(sentences1, sentences2, threshold=25):
     
     for i, s1 in enumerate(sentences1):
         for j, s2 in enumerate(sentences2):
-            # Direct n-gram overlap
             direct_score = calculate_ngram_overlap(s1, s2, n=3)
-            
-            # Semantic (synonym-based)
             semantic_score = calculate_semantic_similarity(s1, s2)
-            
             best_score = max(direct_score, semantic_score)
             
             if best_score >= threshold:
-                # Determine type
                 if direct_score >= semantic_score:
                     match_type = "Direct Copy"
                     match_score = direct_score
@@ -260,7 +323,7 @@ def generate_pdf_report(result):
         [Paragraph('N-gram Overlap (Exact Copy)', normal_style), Paragraph(f"{result.get('ngram_similarity', 0)}%", normal_style)],
         [Paragraph('Fuzzy Match (Edit Detection)', normal_style), Paragraph(f"{result.get('fuzzy_similarity', 0)}%", normal_style)],
         [Paragraph('Word Overlap (Jaccard)', normal_style), Paragraph(f"{result.get('jaccard_similarity', 0)}%", normal_style)],
-        [Paragraph('Semantic Match (Meaning)', normal_style), Paragraph(f"{result.get('semantic_similarity', 0)}%", normal_style)],
+        [Paragraph('Semantic Match (WordNet)', normal_style), Paragraph(f"{result.get('semantic_similarity', 0)}%", normal_style)],
         [Paragraph('Direct Copy Detected', normal_style), Paragraph(f"{result.get('direct_match_percent', 0)}%", normal_style)],
         [Paragraph('Paraphrase Detected', normal_style), Paragraph(f"{result.get('paraphrase_percent', 0)}%", normal_style)],
     ]
@@ -317,15 +380,12 @@ def check_plagiarism():
     if not text1.strip() or not text2.strip():
         return render_template("index.html", result={"error": "Could not extract text"})
 
-    # Overall similarity
     scores = calculate_hybrid_similarity(text1, text2)
 
-    # Sentence-level matching
     sentences1 = split_into_sentences(text1)
     sentences2 = split_into_sentences(text2)
     matches = find_matching_sentences(sentences1, sentences2)
 
-    # Calculate direct vs paraphrase percentages
     direct_match_percent = 0
     paraphrase_percent = 0
 
@@ -338,7 +398,6 @@ def check_plagiarism():
             direct_match_percent = round((direct_count / total_matches) * 100, 2)
             paraphrase_percent = round((paraphrase_count / total_matches) * 100, 2)
 
-    # Verdict
     hybrid_score = scores['hybrid']
     if hybrid_score > 60:
         verdict = "🔴 High Plagiarism Detected"
